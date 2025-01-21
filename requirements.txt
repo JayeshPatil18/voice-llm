@@ -1,7 +1,4 @@
-flask
-numpy
-scikit-learn
-gunicorn
-requests
-pandas
-flask_cors
+Flask
+flask-cors
+ibm-watson
+ibm-cloud-sdk-core

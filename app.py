@@ -1,109 +1,83 @@
-from flask import Flask,request,jsonify
-import numpy as np
-import pickle
-import requests
+from flask import Flask, request, jsonify
+from ibm_watson import SpeechToTextV1
+from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
 from flask_cors import CORS
-# import sys
+import os
 
-# Risky Code added
-num_parts = 8
-combined_parts = []
-for i in range(1, num_parts + 1):
-    filename = f'part{i}.pkl'
-    with open(filename, 'rb') as f:
-        part = pickle.load(f)
-        combined_parts.append(part)
-        print(f"Part {i} loaded from {filename}")
-
-# Combine all parts into a complete dataset
-similarity = np.concatenate(combined_parts, axis=0)
-
-# similarity = pickle.load(open('similarity.pkl','rb'))
-main_df = pickle.load(open('main.pkl','rb'))
-
+# Initialize Flask App
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Allow cross-origin requests if needed
 
-# def fetch_poster(movie_id):
-#     url = "https://api.themoviedb.org/3/movie/{}?api_key=8265bd1679663a7ea12ac168da84d2e8&language=en-US".format(movie_id)
-#     data = requests.get(url)
-#     data = data.json()
-#     poster_path = data['poster_path']
-#     full_path = "https://image.tmdb.org/t/p/w500/" + poster_path
-#     return full_path
+# IBM Watson Speech-to-Text credentials
+API_KEY = "pjY2CGxvOgEfd6CtoiP_sEcp8Q8KNzQoWHegdeTmWf-I"
+URL = "https://api.au-syd.speech-to-text.watson.cloud.ibm.com/instances/efebc413-bad8-4936-9a0c-8227791cae9a"
 
-# Functions
-def recommend(movie):
-    index = main_df[main_df['title'].str.lower() == movie.lower()].index[0]
-    distances = sorted(list(enumerate(similarity[index])),reverse=True,key = lambda x: x[1])
-    
-    movieIds = []
-    # Range from 1 to 100
-    for i in distances[1:71]:
-        movieIds.append(main_df.iloc[i[0]].movie_id)
-    return movieIds
+# Predefined SOS Words
+SOS_WORDS = ["help", "help me", "baccho muze"]
 
-def movies(input):
+# Setup IBM Watson Speech-to-Text
+authenticator = IAMAuthenticator(API_KEY)
+speech_to_text = SpeechToTextV1(authenticator=authenticator)
+speech_to_text.set_service_url(URL)
 
-    recommended_movie_ids = []
-    
-    for i in range(len(input)):
-        recommended_movie_ids += recommend(input[i])
-
-
-    similar_movie_df = main_df[main_df['movie_id'].isin(recommended_movie_ids)]
-    similar_movie_df = similar_movie_df.drop_duplicates(subset='movie_id')
-    
-    recommended_movie = similar_movie_df.sort_values(by='vote_count', ascending=False)
-
-    return recommended_movie
-
-
-@app.route('/')
-def index():
-    return "Hello world"
-
-@app.route('/movies')
-def movies():
-    
+# Function to convert speech to text
+def convert_speech_to_text(audio_file_path):
     try:
-        
-        movies_df = main_df.head(50)
+        with open(audio_file_path, "rb") as audio_file:
+            response = speech_to_text.recognize(
+                audio=audio_file,
+                content_type='audio/wav',
+                model='en-US_BroadbandModel',
+                timestamps=True,
+                word_alternatives_threshold=0.9
+            ).get_result()
 
-        movies_json = movies_df.to_json(orient='records')
-        return jsonify({'recommendations':str(movies_json)})
-
+            transcript = ''
+            for result in response['results']:
+                transcript += result['alternatives'][0]['transcript']
+            return transcript.lower()
     except Exception as e:
-        
-        return jsonify({"error": str(e)}), 500
+        raise Exception(f"Error with Speech-to-Text: {e}")
 
+# Function to detect SOS words
+def detect_sos_condition(transcript):
+    for word in SOS_WORDS:
+        if word in transcript:
+            return True
+    return False
 
-@app.route('/predict',methods=['POST'])
-def predict():
-    data = request.get_json()
-    input_movies = data.get('movielist')
-
+# Define API Endpoints
+@app.route('/process-audio', methods=['POST'])
+def process_audio():
     try:
+        # Check if an audio file is included in the request
+        if 'audio' not in request.files:
+            return jsonify({'error': 'No audio file provided'}), 400
 
-        movies_df = movies(input_movies).head(50)
+        # Save the uploaded file
+        audio_file = request.files['audio']
+        audio_file_path = f"temp_audio/{audio_file.filename}"
+        os.makedirs(os.path.dirname(audio_file_path), exist_ok=True)
+        audio_file.save(audio_file_path)
 
-        # Fetch Images 
-        # for index, row in movies_df.iterrows():
-        #     movie_id = row['id']
-        #     poster_url = fetch_poster(movie_id)
-        #     print(f'###{poster_url}', file=sys.stderr)
-        #     movies_df.at[index, 'poster_path'] = poster_url
+        # Process the audio
+        transcript = convert_speech_to_text(audio_file_path)
+        sos_detected = detect_sos_condition(transcript)
 
-        movies_json = movies_df.to_json(orient='records')
-        return jsonify({'recommendations':str(movies_json)})
+        # Cleanup temporary file
+        os.remove(audio_file_path)
 
+        return jsonify({
+            'transcript': transcript,
+            'sos_detected': sos_detected
+        })
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
-        # if "out of bounds" in str(e):
-        #     return jsonify({"error": "entered movie on in dataset"}), 49
-
-        # print(f'Error: {e}', file=sys.stderr)  # Print any error to stderr
-        return jsonify({"error": str(e)}), 500
+# Health Check Endpoint
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'API is running'})
 
 if __name__ == '__main__':
     app.run(debug=True)
